@@ -1,0 +1,155 @@
+rules_version = '2';
+
+// Kuhit's privacy and safety rules. There is no server: these rules are what keep
+// senders hidden until a mutual kuhit, clear selfies away from strangers, and the daily
+// kuhit limit honest. See js/backend-firebase.js for the data layout.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function path(p) { return /databases/$(database)/documents/$(p); }
+    function pairOf(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
+    function isMatch(a, b) { return exists(path('matches/' + pairOf(a, b))); }
+    // Kuhit's day runs on Philippine time (UTC+8).
+    function today() { return math.floor((request.time.toMillis() + 28800000) / 86400000); }
+    function freshSelfie(uid) {
+      return exists(path('profiles/' + uid))
+        && get(path('profiles/' + uid)).data.get('selfieAt', null) is timestamp
+        && get(path('profiles/' + uid)).data.selfieAt > request.time - duration.value(24, 'h');
+    }
+    function verified(uid) {
+      return exists(path('users/' + uid))
+        && get(path('users/' + uid)).data.get('verified', null) is map
+        && get(path('users/' + uid)).data.verified.get('id', false) == true;
+    }
+    function blocked(owner, other) {
+      return exists(path('blocks/' + owner)) && other in get(path('blocks/' + owner)).data.get('ids', []);
+    }
+
+    // Private account. Must be 18+ by birthdate.
+    match /users/{uid} {
+      allow read, delete: if signedIn() && me() == uid;
+      allow create: if signedIn() && me() == uid
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 30
+        && request.resource.data.birthdate is timestamp
+        && request.resource.data.birthdate < request.time - duration.value(6575, 'd')
+        && request.resource.data.verified == null;
+      allow update: if signedIn() && me() == uid
+        && request.resource.data.birthdate == resource.data.birthdate;
+    }
+
+    // First name: only the owner and their mutual matches.
+    match /names/{uid} {
+      allow read: if signedIn() && (me() == uid || isMatch(me(), uid));
+      allow write: if signedIn() && me() == uid
+        && request.resource.data.keys().hasOnly(['name'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 30;
+      allow delete: if signedIn() && me() == uid;
+    }
+
+    // Clear selfie: the owner, and matches while it is under 24 hours old.
+    match /selfies/{uid} {
+      allow read: if signedIn() && (me() == uid
+        || (isMatch(me(), uid) && resource.data.at > request.time - duration.value(24, 'h')));
+      allow write: if signedIn() && me() == uid && verified(uid)
+        && request.resource.data.keys().hasOnly(['img', 'at'])
+        && request.resource.data.img is string && request.resource.data.img.size() < 900000
+        && request.resource.data.at == request.time;
+      allow delete: if signedIn() && me() == uid;
+    }
+
+    // What people nearby see. The blurred thumbnail is tiny on purpose (see js/camera.js).
+    match /profiles/{uid} {
+      allow get: if signedIn();
+      allow list: if signedIn() && request.query.limit <= 50;
+      allow write: if signedIn() && me() == uid && verified(uid)
+        && request.resource.data.keys().hasOnly(['blur', 'selfieAt', 'status', 'visible', 'lat', 'lng', 'cell', 'seenAt'])
+        && (!('blur' in request.resource.data) || (request.resource.data.blur is string && request.resource.data.blur.size() < 4000))
+        && (!('status' in request.resource.data) || (request.resource.data.status is string && request.resource.data.status.size() <= 40));
+      allow delete: if signedIn() && me() == uid;
+    }
+
+    // A kuhit is only ever visible to the person who sent it.
+    match /kuhits/{id} {
+      allow read: if signedIn() && resource.data.from == me();
+      allow create: if signedIn()
+        && id == me() + '_' + request.resource.data.to
+        && request.resource.data.keys().hasOnly(['from', 'to', 'type', 'at'])
+        && request.resource.data.from == me()
+        && request.resource.data.to != me()
+        && request.resource.data.type in ['friendly', 'crush']
+        && request.resource.data.at == request.time
+        && verified(me()) && freshSelfie(me())
+        && !blocked(request.resource.data.to, me())
+        && getAfter(path('limits/' + me())).data.last == id;
+      allow delete: if signedIn() && resource.data.from == me();
+    }
+
+    // Daily kuhit count: goes up by exactly one with each new kuhit, resets on a new day, max 5.
+    match /limits/{uid} {
+      function okCount() {
+        let n = request.resource.data;
+        let fresh = resource == null || resource.data.day != today();
+        return n.day == today() && n.count <= 5
+          && n.count == (fresh ? 1 : resource.data.count + 1)
+          && n.last is string && n.last.matches(me() + '_.+')
+          && !exists(path('kuhits/' + n.last))
+          && existsAfter(path('kuhits/' + n.last));
+      }
+      allow read: if signedIn() && me() == uid;
+      allow create, update: if signedIn() && me() == uid
+        && request.resource.data.keys().hasOnly(['day', 'count', 'last']) && okCount();
+    }
+
+    // "Someone kuhit you": the receiver reads it; it's written with the kuhit itself.
+    match /inbox/{to}/items/{from} {
+      allow read: if signedIn() && me() == to;
+      allow update: if signedIn() && me() == to
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seen']);
+      allow create: if signedIn() && me() == from
+        && request.resource.data.keys().hasOnly(['from', 'type', 'at', 'seen'])
+        && request.resource.data.from == me()
+        && request.resource.data.at == request.time
+        && request.resource.data.type == getAfter(path('kuhits/' + from + '_' + to)).data.type
+        && !exists(path('kuhits/' + from + '_' + to));
+      allow delete: if signedIn() && (me() == to || me() == from);
+    }
+
+    // A mutual kuhit: allowed only when both people really kuhit each other.
+    match /matches/{id} {
+      function m() { return request.resource.data.members; }
+      allow read: if signedIn() && me() in resource.data.members;
+      allow create: if signedIn()
+        && m().size() == 2 && me() in m() && m()[0] < m()[1]
+        && id == m()[0] + '_' + m()[1]
+        && request.resource.data.types[m()[0]] == get(path('kuhits/' + m()[0] + '_' + m()[1])).data.type
+        && request.resource.data.types[m()[1]] == get(path('kuhits/' + m()[1] + '_' + m()[0])).data.type
+        && request.resource.data.crush == (request.resource.data.types[m()[0]] == 'crush' && request.resource.data.types[m()[1]] == 'crush')
+        && !blocked(m()[0], m()[1]) && !blocked(m()[1], m()[0]);
+      allow update: if signedIn() && me() in resource.data.members
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastAt', 'lastText', 'lastFrom']);
+      allow delete: if signedIn() && me() in resource.data.members;
+
+      match /messages/{msg} {
+        function member() { return me() in get(path('matches/' + id)).data.members; }
+        allow read: if signedIn() && member();
+        allow create: if signedIn() && member()
+          && request.resource.data.keys().hasOnly(['from', 'text', 'at'])
+          && request.resource.data.from == me()
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 500
+          && request.resource.data.at == request.time;
+      }
+    }
+
+    match /blocks/{uid} {
+      allow read, write: if signedIn() && me() == uid;
+    }
+
+    match /reports/{id} {
+      allow create: if signedIn() && request.resource.data.from == me()
+        && request.resource.data.reason is string && request.resource.data.reason.size() <= 200;
+    }
+  }
+}
