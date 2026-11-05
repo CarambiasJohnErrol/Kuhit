@@ -9,7 +9,7 @@ opens.
 
 Screens follow the Kuhit Figma file ("MVP screens", sections 1-8): onboarding and sign-up,
 verification, daily check-in, nearby, sending a kuhit, receiving and mutual, chats and safety,
-me and settings. Brand: Jeepney Pop (Archivo Black + Space Grotesk; red `#E63946`, yellow
+me and settings. Brand: Jeepney Pop (Archivo Black + Space Grotesk; red `#D62839`, yellow
 `#FFD60A`, blue `#1D4ED8`, ink `#111111`, cream `#FFF8E1`).
 
 ## Run it

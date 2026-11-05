@@ -1,8 +1,8 @@
 // Kuhit service worker: keeps the app shell available offline and loads it fast.
 // Bump VERSION on every release so phones pick up the new files.
-const VERSION = 'kuhit-v1';
+const VERSION = 'kuhit-v2';
 const SHELL = [
-  './', 'index.html', 'manifest.webmanifest', 'firebase-config.js?v=1', 'css/app.css?v=1', 'js/app.js?v=1',
+  './', 'index.html', 'manifest.webmanifest', 'firebase-config.js?v=2', 'css/app.css?v=2', 'js/app.js?v=2',
   'js/geo.js', 'js/camera.js', 'js/backend-demo.js', 'js/backend-firebase.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
