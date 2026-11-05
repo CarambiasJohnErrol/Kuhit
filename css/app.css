@@ -1,7 +1,7 @@
 /* Kuhit · Jeepney Pop: thick ink outlines, hard shadows, bold Pinoy colour. */
 :root {
-  --red: #E63946;
-  --red-dk: #C92F3B;
+  --red: #D62839; /* AA contrast with white text (was #E63946) */
+  --red-dk: #B01F2E;
   --yellow: #FFD60A;
   --blue: #1D4ED8;
   --ink: #111111;
@@ -141,7 +141,7 @@ small svg, .muted svg { width: 14px; height: 14px; vertical-align: -2px; margin-
 
 /* ---------- form ---------- */
 .field { display: block; margin: 14px 0 0; }
-.field > span { display: flex; font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.field > span, .field > label:not(.field) { display: flex; font-weight: 700; font-size: 14px; margin-bottom: 6px; }
 .field input {
   width: 100%; min-height: 50px; padding: 0 14px;
   border: var(--line); border-radius: 12px; background: var(--paper);
@@ -384,3 +384,52 @@ video.mirror { transform: scaleX(-1); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- logo mark (hand) ---------- */
+.logo-mark { display: block; width: 100%; height: auto; }
+.logo-tile { width: 72px; height: 72px; border-radius: 18px; background: var(--red); color: #fff; border: 3px solid var(--ink); box-shadow: var(--shadow); display: grid; place-items: center; padding: 12px; }
+.logo-tile.big { width: 112px; height: 112px; border-radius: 28px; padding: 18px; box-shadow: var(--shadow-lg); }
+.splash .logo-tile { animation: pop 1s ease-in-out infinite alternate; }
+.tab-mark { width: 24px; height: 22px; stroke-width: 15; }
+.logo-mark.ic { width: 70%; stroke-width: 14; }
+.toast-ic .logo-mark.ic { width: 24px; }
+
+/* ---------- sign-up inputs ---------- */
+.hint:empty { display: none; }
+.hint { display: flex; gap: 6px; align-items: flex-start; color: var(--muted); margin-top: 6px; font-size: 13px; }
+.hint svg { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; }
+.hint.ok { color: #1B7A3A; font-weight: 700; }
+.hint.bad { color: var(--red-dk); font-weight: 700; }
+
+/* ---------- how it works ---------- */
+.push-right { margin-left: auto; }
+.intro { gap: 10px; }
+.intro-art { width: 150px; height: 150px; border-radius: 50%; border: 3px solid var(--ink); box-shadow: var(--shadow-lg); display: grid; place-items: center; margin-bottom: 10px; animation: up .35s ease-out; }
+.intro-art svg { width: 64px; height: 64px; }
+.intro-art .logo-mark { width: 92px; height: auto; stroke-width: 13; }
+.intro-art.yellow { background: var(--yellow); }
+.intro-art.red { background: var(--red); color: #fff; }
+.intro-art.pink { background: var(--pink); color: var(--red); }
+.intro-step { font-size: 13px; font-weight: 700; color: var(--muted); }
+.intro-dots { display: flex; gap: 8px; margin-top: 10px; }
+.intro-dots i { width: 8px; height: 8px; border-radius: 4px; background: #CFC8B4; transition: width .2s; }
+.intro-dots i.on { width: 24px; background: var(--ink); }
+
+/* ---------- kuhit sent: poke animation + undo ---------- */
+.poke { position: relative; width: 150px; height: 150px; border-radius: 50%; border: 3px solid var(--ink); box-shadow: var(--shadow-lg); display: grid; place-items: center; margin-bottom: 8px; }
+.poke.yellow { background: var(--yellow); }
+.poke.pink { background: var(--pink); color: var(--red); }
+.poke-mark { width: 96px; stroke-width: 13; animation: poke .5s ease-in-out 3; }
+.poke-mark path:nth-child(-n+3) { animation: popl .5s ease-in-out 3; }
+.poke-heart { position: absolute; top: 10px; right: 6px; width: 34px; height: 34px; color: var(--red); animation: pop .6s ease-in-out infinite alternate; }
+.poke-heart svg { width: 34px; height: 34px; fill: var(--red); }
+@keyframes poke { 50% { transform: translate(6px, -6px); } }
+@keyframes popl { 0%, 40% { opacity: 0; } 60% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .poke-mark, .poke-mark path, .poke-heart, .intro-art, .splash .logo-tile { animation: none !important; } }
+.undo-bar { width: 220px; height: 8px; border: 2px solid var(--ink); border-radius: 6px; background: var(--paper); overflow: hidden; margin-top: 6px; }
+.undo-bar i { display: block; height: 100%; background: var(--ink); transform-origin: left; animation: drain linear forwards; }
+@keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.ask-notif { display: flex; gap: 12px; align-items: flex-start; text-align: left; margin-top: 18px; width: 100%; }
+.ask-notif b { display: block; }
+.ask-notif small { display: block; color: var(--muted); margin-top: 2px; }
+.ask-btns { margin-top: 10px; align-items: center; gap: 14px; }

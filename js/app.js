@@ -28,6 +28,9 @@ const S = {
   msgs: { id: null, list: [] },
   err: '', busy: false,
   resendAt: 0,
+  introStep: 0,
+  pending: null, // a kuhit waiting out its undo window
+  phoneTouched: false,
 };
 
 const unsubs = [];
@@ -54,7 +57,7 @@ const DAY = 24 * 3600 * 1000;
 const me = () => S.user?.uid;
 const pairId = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
 const today = () => geo.manilaDay();
-const kuhitsLeft = () => Math.max(0, S.be.DAILY_KUHITS - (S.limit.day === today() ? S.limit.count : 0));
+const kuhitsLeft = () => Math.max(0, S.be.DAILY_KUHITS - (S.limit.day === today() ? S.limit.count : 0) - (S.pending ? 1 : 0));
 const hasSelfie = () => !!S.profile?.selfieAt && Date.now() - S.profile.selfieAt < DAY;
 const isVisible = () => hasSelfie() && !!S.profile?.visible;
 const matchWith = (uid) => S.matches.find((m) => m.members.includes(uid));
@@ -67,6 +70,68 @@ function normalizePhone(v) {
   if (d.startsWith('63')) d = d.slice(2);
   if (d.startsWith('0')) d = d.slice(1);
   return /^9\d{9}$/.test(d) ? `+63${d}` : null;
+}
+// Phone: keep only the 10 digits after +63, shown as "917 123 4567".
+function phoneDigits(v) {
+  const t = String(v || '').trim();
+  let d;
+  if (t.startsWith('+63')) d = t.slice(3).replace(/\D/g, '');
+  else if (t.startsWith('+')) d = ''; // erasing the +63 prefix
+  else {
+    d = t.replace(/\D/g, '');
+    if (d.startsWith('63') && d[2] === '9') d = d.slice(2); // typed or pasted 63917...
+    else if (d.startsWith('0')) d = d.slice(1); // typed or pasted 0917...
+  }
+  return d.slice(0, 10);
+}
+const fmtPhone = (d) => [d.slice(0, 3), d.slice(3, 6), d.slice(6, 10)].filter(Boolean).join(' ');
+// The phone field always reads "+63 917 123 4567", as in the Figma sign-up screen.
+const phoneDisplay = (d) => (d ? `+63 ${fmtPhone(d)}` : '');
+function phoneHint() {
+  const d = S.draft.phone || '';
+  if (/^9\d{9}$/.test(d)) return { cls: 'ok', html: `${I.check}Looks good` };
+  if (d && d[0] !== '9') return { cls: 'bad', html: `${I.info}PH mobile numbers start with 9, like 917 123 4567.` };
+  if (d && S.phoneTouched) return { cls: 'bad', html: `${I.info}That's ${d.length} digit${d.length === 1 ? '' : 's'}. You need 10 after +63.` };
+  return { cls: '', html: "We'll send a one-time code." };
+}
+// Birthday: three small fields (MM / DD / YYYY). The ISO date is set only when it's a real date.
+function readBday() {
+  const bd = S.draft.bd || '';
+  if (bd.length < 8) return { state: 'partial' };
+  const m = +bd.slice(0, 2), d = +bd.slice(2, 4), y = +bd.slice(4, 8);
+  const thisYear = new Date().getFullYear();
+  if (y < 1900 || y > thisYear) return { state: 'year' };
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (m < 1 || m > 12 || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return { state: 'date' };
+  const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const age = ageOn(iso);
+  if (age < 0) return { state: 'date' };
+  return { state: age < 18 ? 'under' : 'ok', iso, age };
+}
+// "MM / DD / YYYY" mask for the birthday field.
+function bdayDigits(v) {
+  let d = String(v || '').replace(/\D/g, '');
+  if (d.length >= 1 && +d[0] > 1) d = `0${d}`;            // month 2-9 -> 02-09
+  if (d.length >= 3 && +d[2] > 3) d = `${d.slice(0, 2)}0${d.slice(2)}`; // day 4-9 -> 04-09
+  return d.slice(0, 8);
+}
+const fmtBday = (d) => [d.slice(0, 2), d.slice(2, 4), d.slice(4, 8)].filter(Boolean).join(' / ');
+
+function bdayHint() {
+  const b = readBday();
+  if (b.state === 'ok') return { cls: 'ok', html: `${I.check}You're ${b.age}` };
+  if (b.state === 'under') return { cls: 'bad', html: `${I.info}You must be 18 or older to use Kuhit.` };
+  if (b.state === 'year') return { cls: 'bad', html: `${I.info}Check the year.` };
+  if (b.state === 'date') return { cls: 'bad', html: `${I.info}That date doesn't exist. Check the month and day.` };
+  return { cls: '', html: '' };
+}
+// Time until the daily kuhits reset (midnight, Philippine time).
+function resetIn() {
+  const now = Date.now();
+  const next = (geo.manilaDay(now) + 1) * 86400000 - 8 * 3600000;
+  const mins = Math.max(1, Math.ceil((next - now) / 60000));
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h ? `${h}h ${m}m` : `${m}m`;
 }
 const maskPhone = (p) => (p ? `${p.slice(0, 3)} ${p.slice(3, 6)} *** ${p.slice(-4)}` : '');
 function ageOn(birth) {
@@ -112,10 +177,12 @@ const I = {
   school: ic('<path d="M2.5 9.5L12 5l9.5 4.5L12 14z"/><path d="M6.5 11.5V16c1.5 1.5 3.4 2.2 5.5 2.2s4-.7 5.5-2.2v-4.5"/>'),
   sparkle: ic('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18"/>'),
 };
+const LOGO_PATHS = '<path d="M186.389 23.7695L171.265 40.4284"/><path d="M159.136 9.15724L154.862 30.6016"/><path d="M203.559 49.4877L182.626 55.8082"/><path d="M100.942 92.607L128.702 57.187C131.347 53.9296 135.166 51.8415 139.336 51.3727C143.506 50.9039 147.693 52.0919 150.995 54.6807C154.297 57.2695 156.45 61.0519 156.99 65.213C157.531 69.3742 156.414 73.5809 153.882 76.927L123.122 115.987C135.812 121.277 147.352 132.737 143.122 146.487C138.362 161.287 123.122 158.487 116.412 152.487L103.722 139.127L87.8624 156.577C79.9036 165.472 54.2036 163.872 43.0036 155.272C31.8036 146.672 17.9036 127.472 26.5 116.5"/><path d="M26.2023 116.607L61.3723 71.7468C63.1731 69.4513 65.812 67.9653 68.7085 67.6155C71.605 67.2658 74.5218 68.081 76.8173 69.8818C79.1127 71.6826 80.5988 74.3215 80.9485 77.218C81.2983 80.1145 80.4831 83.0313 78.6823 85.3268"/><path d="M70.6622 95.5571L83.6222 79.0271C85.423 76.7303 88.0625 75.243 90.9599 74.8923C93.8574 74.5416 96.7755 75.3563 99.0722 77.1571C101.369 78.9579 102.856 81.5974 103.207 84.4948C103.558 87.3922 102.743 90.3103 100.942 92.6071"/>';
+const logoMark = (cls = '') => `<svg class="logo-mark ${cls}" viewBox="10 0 202 172" fill="none" stroke="currentColor" stroke-width="11.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${LOGO_PATHS}</svg>`;
 const tapMarks = '<span class="tapmarks" aria-hidden="true"><i></i><i></i><i></i></span>';
 
 // ---------- routing ----------
-const GUEST = ['welcome', 'signup', 'otp', 'login'];
+const GUEST = ['welcome', 'intro', 'signup', 'otp', 'login'];
 const VERIFY = ['face', 'face-failed', 'id', 'scan', 'id-review', 'id-pending', 'verified', 'not-eligible'];
 const APP = ['nearby', 'kuhits', 'kuhit', 'sent', 'mutual', 'chats', 'chat', 'me', 'blocked', 'privacy', 'safety', 'selfie', 'status'];
 const CAMERA = ['face', 'scan', 'selfie'];
@@ -180,7 +247,7 @@ function render(fromData = false) {
 }
 
 // ---------- shared pieces ----------
-const splash = () => `<div class="splash"><div class="logo-k">K</div></div>`;
+const splash = () => `<div class="splash"><div class="logo-tile">${logoMark()}</div></div>`;
 const backBtn = (to) => `<button class="icon-btn back" data-act="back" ${to ? `data-to="${to}"` : ''} aria-label="Back">${I.back}</button>`;
 const steps = (n) => `<div class="steps"><div class="steps-label">Step ${n} of 5</div><div class="steps-bar"><i style="width:${n * 20}%"></i></div></div>`;
 const errLine = () => (S.err ? `<p class="err" role="alert">${I.info}<span>${esc(S.err)}</span></p>` : '');
@@ -203,7 +270,7 @@ function tabBar(active) {
   const reads = store.get('kuhit-read', {});
   const unread = S.matches.filter((m) => m.lastFrom && m.lastFrom !== me() && (m.lastAt || 0) > (reads[m.id] || 0)).length;
   const item = (name, label, icon, badge) => `<a href="#/${name}" class="tab${active === name ? ' active' : ''}"><span class="tab-ic">${icon}${badge ? `<b class="badge">${badge}</b>` : ''}</span>${label}</a>`;
-  return `<nav class="tabbar" aria-label="Sections">${item('nearby', 'Nearby', I.pin)}${item('kuhits', 'Kuhits', I.hand, unseen)}${item('chats', 'Chats', I.chat, unread)}${item('me', 'Me', I.user)}</nav>`;
+  return `<nav class="tabbar" aria-label="Sections">${item('nearby', 'Nearby', I.pin)}${item('kuhits', 'Kuhits', logoMark('tab-mark'), unseen)}${item('chats', 'Chats', I.chat, unread)}${item('me', 'Me', I.user)}</nav>`;
 }
 function header(right = '') {
   return `<header class="apphead"><span class="wordmark">kuhit</span>${right}</header>`;
@@ -214,16 +281,48 @@ function visChip() {
     : `<button class="chip chip-invis" data-act="go" data-to="${hasSelfie() ? 'me' : 'selfie'}">${I.eyeOff}Invisible</button>`;
 }
 
+function phoneField() {
+  const h = phoneHint();
+  return `<label class="field${h.cls === 'bad' ? ' bad' : ''}" id="phone-field"><span>Mobile number</span>
+    <input id="f-phone" data-model="phone" data-live="1" type="tel" inputmode="numeric" autocomplete="tel" placeholder="+63 9XX XXX XXXX" maxlength="16" aria-describedby="phone-hint" value="${esc(phoneDisplay(S.draft.phone || ''))}">
+    <small id="phone-hint" class="hint ${h.cls}">${h.html}</small></label>`;
+}
+function bdayField() {
+  const h = bdayHint();
+  return `<label class="field${h.cls === 'bad' ? ' bad' : ''}" id="bd-field"><span>Birthday</span>
+    <input id="f-bd" data-model="bd" data-live="1" type="text" inputmode="numeric" autocomplete="bday" placeholder="MM / DD / YYYY" maxlength="14" aria-describedby="bd-hint" value="${esc(fmtBday(S.draft.bd || ''))}">
+    <small id="bd-hint" class="hint ${h.cls}">${h.html}</small></label>`;
+}
+function signupOk() {
+  const d = S.draft;
+  const phoneOk = !!S.user || !!normalizePhone(d.phone);
+  return phoneOk && readBday().state === 'ok' && (d.name || '').trim().length > 0;
+}
+// Update hints and buttons in place while typing, so fields never lose focus or caret.
+function refreshLive() {
+  const set = (fieldId, hintId, h) => {
+    const f = document.getElementById(fieldId), el = document.getElementById(hintId);
+    if (f) f.classList.toggle('bad', h.cls === 'bad');
+    if (el) { el.className = `hint ${h.cls}`; el.innerHTML = h.html; }
+  };
+  set('phone-field', 'phone-hint', phoneHint());
+  set('bd-field', 'bd-hint', bdayHint());
+  const c = document.querySelector('[data-act="signup-continue"]');
+  if (c) c.disabled = !signupOk() || S.busy;
+  const l = document.querySelector('[data-act="login-send"]');
+  if (l) l.disabled = !normalizePhone(S.draft.phone) || S.busy;
+  const e = document.querySelector('.err'); if (e && !S.err) e.remove();
+}
+
 // ---------- screens ----------
 const SCREENS = {
   // 01 Welcome
   welcome: () => `
     <div class="pad center-col welcome">
       <div class="grow center-col">
-        <div class="logo-k big">K</div>
+        <div class="logo-tile big">${logoMark()}</div>
         <h1 class="wordmark xl">kuhit</h1>
         <p class="lede">Meet people around you.<br>One kuhit at a time.</p>
-        <div class="dots-duo" aria-hidden="true"><i class="b"></i><i class="r"></i>${tapMarks}</div>
       </div>
       <div class="stack">
         ${btn('Get started', 'start-signup')}
@@ -233,29 +332,45 @@ const SCREENS = {
       </div>
     </div>`,
 
+  // How Kuhit works (3 short cards before sign-up)
+  intro: () => {
+    const i = Math.min(S.introStep || 0, 2);
+    const cards = [
+      { art: `<div class="intro-art yellow">${I.camera}</div>`, t: "Take today's selfie", b: 'One fresh selfie a day, straight from the camera. No old photos, no filters, no catfish.' },
+      { art: `<div class="intro-art red">${logoMark()}</div>`, t: 'Kuhit someone nearby', b: "Send a Friendly or a Crush kuhit. They won't know it's you unless they kuhit back." },
+      { art: `<div class="intro-art pink">${I.heart}</div>`, t: "Kuhit back? It's mutual!", b: 'Both selfies unblur and a chat opens. If they don\'t kuhit back, nothing happens. Nobody gets rejected.' },
+    ];
+    const c = cards[i];
+    return `
+    <div class="pad col">
+      <div class="topline">${i ? '<button class="icon-btn back" data-act="intro-prev" aria-label="Back">' + I.back + '</button>' : backBtn('welcome')}<button class="link push-right" data-act="intro-done">Skip</button></div>
+      <div class="grow center-col intro" aria-live="polite">
+        ${c.art}
+        <p class="intro-step">${i + 1} of 3</p>
+        <h1 class="h1 center">${c.t}</h1>
+        <p class="sub center">${c.b}</p>
+        <div class="intro-dots" aria-hidden="true">${cards.map((_, k) => `<i class="${k === i ? 'on' : ''}"></i>`).join('')}</div>
+      </div>
+      ${btn(i < 2 ? 'Next' : 'Create my account', 'intro-next')}
+    </div>`;
+  },
+
   // 02 Sign up / 03 under 18
   signup: () => {
     const d = S.draft;
     const signedIn = !!S.user;
     const needPhone = !signedIn;
-    const age = ageOn(d.birthdate);
-    const under = age !== null && age < 18;
-    const phoneOk = !needPhone || !!normalizePhone(d.phone);
-    const ok = phoneOk && d.birthdate && !under && (d.name || '').trim().length > 0;
+    const ok = signupOk();
     return `
     <div class="pad col">
       <div class="topline">${signedIn ? '' : backBtn('welcome')}${steps(1)}</div>
       <div class="scroll grow">
         <h1 class="h1">Create your account</h1>
         <p class="sub">Just the basics. Your name stays hidden until a mutual kuhit.</p>
-        ${needPhone ? `<label class="field"><span>Mobile number</span>
-          <input id="f-phone" data-model="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+63 9XX XXX XXXX" value="${esc(d.phone || '')}">
-          <small>We'll send a one-time code.</small></label>` : ''}
-        <label class="field${under ? ' bad' : ''}"><span>Birthday</span>
-          <input id="f-birth" data-model="birthdate" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${esc(d.birthdate || '')}">
-          ${under ? `<small class="err-text">${I.info} You must be 18 or older to use Kuhit.</small>` : ''}</label>
+        ${needPhone ? phoneField() : ''}
+        ${bdayField()}
         <label class="field"><span>First name</span>
-          <input id="f-name" data-model="name" type="text" autocomplete="given-name" maxlength="30" placeholder="e.g. Mika" value="${esc(d.name || '')}">
+          <input id="f-name" data-model="name" data-live="1" type="text" autocomplete="given-name" maxlength="30" placeholder="e.g. Mika" value="${esc(d.name || '')}">
           <small>Only shown after a mutual kuhit.</small></label>
         <div class="note note-yellow">${I.shield}<span>Kuhit is for 18+ only. We'll verify your age in the next steps.</span></div>
         ${errLine()}
@@ -295,8 +410,7 @@ const SCREENS = {
       <div class="grow">
         <h1 class="h1">Welcome back!</h1>
         <p class="sub">Log in with your mobile number.</p>
-        <label class="field"><span>Mobile number</span>
-          <input id="f-phone" data-model="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+63 9XX XXX XXXX" value="${esc(S.draft.phone || '')}"></label>
+        ${phoneField()}
         ${errLine()}
       </div>
       <div class="stack">
@@ -430,17 +544,16 @@ const SCREENS = {
   // 13 Verified + permissions
   verified: () => {
     const locOn = S.loc.state === 'ok' || S.loc.state === 'asking';
-    const notifOn = notificationsOn();
     return `
     <div class="pad col">
       <div class="grow center-col">
         <div class="bigicon blue">${I.check}</div>
         <h1 class="h1 center">You're verified!</h1>
-        <p class="sub center">Two quick permissions and you're in.</p>
+        <p class="sub center">One quick permission and you're in.</p>
         <div class="card perm">
           <div class="perm-row"><span class="ri yellow">${I.pin}</span><div class="grow"><b>Location</b><small>Shows you to people nearby as ~50m. Never exact, never a pin.</small></div>${toggle('t-loc', locOn, 'perm-loc')}</div>
-          <div class="perm-row"><span class="ri yellow">${I.bell}</span><div class="grow"><b>Notifications</b><small>Know when someone kuhit you. The sender stays hidden.</small></div>${toggle('t-notif', notifOn, 'perm-notif')}</div>
         </div>
+        <p class="fine">We'll ask about notifications after your first kuhit.</p>
         <p class="fine">By continuing you agree that Kuhit uses your approximate location and today's selfie to show you to people nearby, as the Data Privacy Act of 2012 requires us to ask.</p>
       </div>
       ${btn("Let's go", 'go', 'primary', 'data-to="selfie"')}
@@ -493,7 +606,7 @@ const SCREENS = {
     const people = nearbyPeople();
     const inboxCount = S.inbox.filter((i) => !matchWith(i.from)).length;
     let top = '', list = '';
-    const strip = `<div class="strip${left ? '' : ' out'}"><b>${left ? `${left} of ${S.be.DAILY_KUHITS} kuhits left today` : 'Out of kuhits today'}</b><span class="pips">${Array.from({ length: S.be.DAILY_KUHITS }, (_, i) => `<i class="${i < left ? 'on' : ''}"></i>`).join('')}</span></div>`;
+    const strip = `<div class="strip${left ? '' : ' out'}"><b>${left ? `${left} of ${S.be.DAILY_KUHITS} kuhits left today` : `Out of kuhits · new ones in ${resetIn()}`}</b><span class="pips">${Array.from({ length: S.be.DAILY_KUHITS }, (_, i) => `<i class="${i < left ? 'on' : ''}"></i>`).join('')}</span></div>`;
 
     if (S.loc.state === 'denied' || S.loc.state === 'error' || S.loc.state === 'idle') {
       // 21 Location off
@@ -538,19 +651,25 @@ const SCREENS = {
       <div class="${hasSelfie() && S.profile?.visible ? '' : 'greyed'}">${list}</div></div>`;
   },
 
-  // 25 / 26 Kuhit sent
+  // 25 / 26 Kuhit sent (with a 5-second undo, then a one-time notifications ask)
   sent: (type) => {
     const crush = type === 'crush';
+    const pending = !!S.pending;
+    const left = kuhitsLeft();
+    const askNotif = !pending && !notificationsOn() && 'Notification' in window && !store.get('kuhit-notif-asked', false);
     return `
     <div class="pad col">
       <div class="grow center-col">
-        <div class="bigicon xl ${crush ? 'pink' : 'yellow'}">${crush ? I.heart : I.hand}${crush ? '' : tapMarks}</div>
-        <h1 class="h1 center">${crush ? 'Crush kuhit sent!' : 'Kuhit sent!'}</h1>
+        <div class="poke ${crush ? 'pink' : 'yellow'}${pending ? '' : ' done'}">${logoMark('poke-mark')}${crush ? `<span class="poke-heart">${I.heart}</span>` : ''}</div>
+        <h1 class="h1 center">${pending ? (crush ? 'Sending your crush kuhit…' : 'Sending your kuhit…') : (crush ? 'Crush kuhit sent!' : 'Kuhit sent!')}</h1>
         ${tag(type)}
-        <p class="sub center">${crush ? "It stays secret. If they kuhit you back, you'll both see each other and a chat opens." : "If they kuhit back, you'll both see each other and a chat opens."}</p>
-        <span class="chip">${kuhitsLeft()} kuhit${kuhitsLeft() === 1 ? '' : 's'} left today</span>
+        <p class="sub center">${pending ? 'Changed your mind? You have a few seconds to undo.' : crush ? "It stays secret. If they kuhit you back, you'll both see each other and a chat opens." : "If they kuhit back, you'll both see each other and a chat opens."}</p>
+        ${pending ? `<div class="undo-bar" aria-hidden="true"><i style="animation-duration:${Math.max(0, S.pending.until - Date.now())}ms"></i></div>`
+          : `<span class="chip">${left ? `${left} kuhit${left === 1 ? '' : 's'} left today` : `That was your last one today · new ones in ${resetIn()}`}</span>`}
+        ${askNotif ? `<div class="card ask-notif"><span class="ri yellow">${I.bell}</span><div class="grow"><b>Want to know if they kuhit back?</b><small>We'll only say "Someone kuhit you!", never who.</small>
+          <div class="row-gap ask-btns">${btn('Turn on', 'notif-ask-yes', 'primary btn-sm')}<button class="link" data-act="notif-ask-no">Not now</button></div></div></div>` : ''}
       </div>
-      <div class="stack">${btn('Back to nearby', 'go', 'primary', 'data-to="nearby"')}${btn('See my kuhits', 'kuhits-sent', 'secondary')}</div>
+      <div class="stack">${pending ? btn('Undo', 'undo-kuhit', 'secondary') : `${btn('Back to nearby', 'go', 'primary', 'data-to="nearby"')}${btn('See my kuhits', 'kuhits-sent', 'secondary')}`}</div>
     </div>`;
   },
 
@@ -569,12 +688,12 @@ const SCREENS = {
           <span class="grow"><b class="row-gap">Someone kuhit you ${tag(i.type)}${i.seen ? '' : '<i class="new-dot" aria-label="new"></i>'}</b>
           <small class="muted">${I.pin}${dist != null ? geo.distanceLabel(dist) : 'Nearby'} · ${ago(i.at)}</small></span>${I.chev}</button>`;
       }).join('') + `<div class="note note-blue">${I.lock}<span>Who kuhit you stays hidden until you kuhit back. Nobody gets rejected.</span></div>`
-        : `<div class="empty center-col"><div class="bigicon yellow">${I.hand}</div><h2 class="h3">No kuhits yet</h2><p class="sub center">When someone kuhit you, it shows up here, hidden until you kuhit back.</p>${btn('Go to nearby', 'go', 'primary', 'data-to="nearby"')}</div>`;
+        : `<div class="empty center-col"><div class="bigicon yellow">${logoMark('ic')}</div><h2 class="h3">No kuhits yet</h2><p class="sub center">When someone kuhit you, it shows up here, hidden until you kuhit back.</p>${btn('Go to nearby', 'go', 'primary', 'data-to="nearby"')}</div>`;
     } else {
       body = sent.length ? sent.map((k) => `<div class="person row">${avatar(k.to, { size: 52 })}
           <span class="grow"><b class="row-gap">You kuhit someone ${tag(k.type)}</b><small class="muted">Waiting · ${ago(k.at)}</small></span></div>`).join('')
         + `<div class="note note-blue">${I.lock}<span>They'll only know it was you if they kuhit back.</span></div>`
-        : `<div class="empty center-col"><div class="bigicon yellow">${I.hand}</div><h2 class="h3">No kuhits sent yet</h2><p class="sub center">You have ${kuhitsLeft()} kuhits left today. Make one count.</p>${btn('Go to nearby', 'go', 'primary', 'data-to="nearby"')}</div>`;
+        : `<div class="empty center-col"><div class="bigicon yellow">${logoMark('ic')}</div><h2 class="h3">No kuhits sent yet</h2><p class="sub center">You have ${kuhitsLeft()} kuhits left today. Make one count.</p>${btn('Go to nearby', 'go', 'primary', 'data-to="nearby"')}</div>`;
     }
     return `<header class="apphead"><h1 class="h1 flush">Kuhits</h1></header><div class="scroll pad-x">${seg}${body}</div>`;
   },
@@ -586,7 +705,7 @@ const SCREENS = {
     const p = personOf(uid);
     const dist = distOf(p);
     const canSend = isVisible() && kuhitsLeft() > 0;
-    const why = !hasSelfie() ? "Take today's selfie to kuhit back." : !S.profile?.visible ? 'Turn on visibility to kuhit back.' : kuhitsLeft() ? '' : "You're out of kuhits today. Come back tomorrow.";
+    const why = !hasSelfie() ? "Take today's selfie to kuhit back." : !S.profile?.visible ? 'Turn on visibility to kuhit back.' : kuhitsLeft() ? '' : `You're out of kuhits today. New ones in ${resetIn()}.`;
     return `
     <div class="pad col">
       <div class="topline">${backBtn('kuhits')}</div>
@@ -743,7 +862,9 @@ function nearbyPeople() {
 
 function personCard(p, canSend) {
   const sent = S.sent.find((k) => k.to === p.uid);
-  const action = sent
+  const action = S.pending?.uid === p.uid
+    ? '<span class="btn btn-sm btn-muted">Sending…</span>'
+    : sent
     ? `<span class="btn btn-sm btn-muted">${tag(sent.type)}</span>`
     : `<button class="btn btn-sm btn-primary" data-act="open-kuhit" data-uid="${esc(p.uid)}" ${canSend ? '' : 'disabled'}>Kuhit</button>`;
   return `<div class="person">${avatar(p.uid, { size: 56 })}
@@ -980,7 +1101,7 @@ function notifyKuhit(type) {
 }
 let toastTimer = null;
 function showToast(title, body, type) {
-  $toast.innerHTML = `<button class="toast-in" data-act="toast">${type ? `<span class="toast-ic">${type === 'crush' ? I.heart : I.hand}</span>` : ''}<span class="grow"><b>${esc(title)}</b>${body ? `<small>${esc(body)}</small>` : ''}</span>${type ? tag(type) : ''}</button>`;
+  $toast.innerHTML = `<button class="toast-in" data-act="toast">${type ? `<span class="toast-ic">${type === 'crush' ? I.heart : logoMark('ic')}</span>` : ''}<span class="grow"><b>${esc(title)}</b>${body ? `<small>${esc(body)}</small>` : ''}</span>${type ? tag(type) : ''}</button>`;
   $toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $toast.classList.remove('show'), 4500);
@@ -992,11 +1113,17 @@ const ACTIONS = {
   go: (el) => { S.err = ''; S.sheet = null; go(el.dataset.to, el.dataset.arg); },
   noop: () => {},
   toast: () => { $toast.classList.remove('show'); go('kuhits'); },
-  'start-signup': () => { S.flow = 'signup'; S.err = ''; go('signup'); },
+  'start-signup': () => { S.flow = 'signup'; S.err = ''; S.introStep = 0; go(store.get('kuhit-intro-seen', false) ? 'signup' : 'intro'); },
+  'intro-next': () => { if ((S.introStep || 0) < 2) { S.introStep = (S.introStep || 0) + 1; render(); } else ACTIONS['intro-done'](); },
+  'intro-prev': () => { S.introStep = Math.max(0, (S.introStep || 0) - 1); render(); },
+  'intro-done': () => { store.set('kuhit-intro-seen', true); S.introStep = 0; S.flow = 'signup'; go('signup'); },
   'start-login': () => { S.flow = 'login'; S.err = ''; go('login'); },
 
   'signup-continue': async () => {
     const d = S.draft;
+    const b = readBday();
+    if (b.state !== 'ok') { S.err = b.state === 'under' ? 'You must be 18 or older to use Kuhit.' : 'Check your birthday.'; return render(); }
+    d.birthdate = b.iso;
     S.err = '';
     if (S.user) {
       await withBusy(async () => {
@@ -1112,29 +1239,28 @@ const ACTIONS = {
   },
 
   'open-kuhit': (el) => {
-    if (!isVisible() || kuhitsLeft() < 1) return;
+    if (!isVisible() || kuhitsLeft() < 1 || S.pending) return;
     S.err = '';
     S.sheet = { type: 'kuhit', uid: el.dataset.uid, choice: 'friendly', back: !!el.dataset.back };
     render();
   },
   'kuhit-type': (el) => { S.sheet.choice = el.dataset.v; render(); },
-  'send-kuhit': async () => {
+  'send-kuhit': () => {
     const { uid, choice } = S.sheet;
-    await withBusy(async () => {
-      try { await S.be.sendKuhit(uid, choice); } catch (e) { throw new Error(kuhitMessage(e)); }
-      const theirs = S.inbox.find((i) => i.from === uid);
-      S.sheet = null;
-      if (theirs) {
-        const id = await S.be.createMatch(uid, choice, theirs.type);
-        const seen = new Set(store.get('kuhit-seen-matches', []));
-        seen.add(id); store.set('kuhit-seen-matches', [...seen]);
-        ensureReveal(uid);
-        go('mutual', id);
-      } else {
-        go('sent', choice);
-      }
-    });
+    if (S.pending) return;
+    S.sheet = null;
+    S.pending = { uid, choice, until: Date.now() + UNDO_MS, timer: setTimeout(commitKuhit, UNDO_MS) };
+    go('sent', choice);
   },
+  'undo-kuhit': () => {
+    if (!S.pending) return;
+    clearTimeout(S.pending.timer);
+    S.pending = null;
+    showToast('Kuhit cancelled', 'Nothing was sent.');
+    go('nearby');
+  },
+  'notif-ask-yes': async () => { store.set('kuhit-notif-asked', true); await ACTIONS['perm-notif'](); },
+  'notif-ask-no': () => { store.set('kuhit-notif-asked', true); render(); },
   'kuhits-sent': () => { S.kuhitsTab = 'sent'; go('kuhits'); },
   ktab: (el) => { S.kuhitsTab = el.dataset.v; render(); },
 
@@ -1193,6 +1319,32 @@ const ACTIONS = {
     render();
   },
 };
+
+const UNDO_MS = 5000;
+// Sends the kuhit once its undo window has passed.
+async function commitKuhit() {
+  const p = S.pending;
+  if (!p) return;
+  try {
+    await S.be.sendKuhit(p.uid, p.choice);
+  } catch (e) {
+    S.pending = null;
+    showToast("Couldn't send your kuhit", kuhitMessage(e));
+    render();
+    return;
+  }
+  S.pending = null;
+  const theirs = S.inbox.find((i) => i.from === p.uid);
+  if (theirs) {
+    const id = await S.be.createMatch(p.uid, p.choice, theirs.type);
+    const seen = new Set(store.get('kuhit-seen-matches', []));
+    seen.add(id); store.set('kuhit-seen-matches', [...seen]);
+    ensureReveal(p.uid);
+    go('mutual', id);
+  } else {
+    render();
+  }
+}
 
 async function withBusy(fn) {
   if (S.busy) return;
@@ -1276,6 +1428,7 @@ const onField = (ev) => {
   const el = ev.target;
   const k = el.dataset?.model;
   if (!k) return;
+  if (el.dataset.live) { onLiveField(el, ev); return; }
   let v = el.value;
   if (S.draft[k] === v && ev.type === 'change') return;
   if (k === 'code') { v = v.replace(/\D/g, '').slice(0, 6); el.value = v; }
@@ -1283,6 +1436,38 @@ const onField = (ev) => {
   if (k !== 'msg') { S.err = ''; render(); }
   if (k === 'code' && v.length === 6) ACTIONS['verify-code']();
 };
+// Sign-up fields update in place (no full re-render), so typing stays smooth.
+function onLiveField(el, ev) {
+  const k = el.dataset.model;
+  const deleting = ev.inputType?.startsWith('delete');
+  const caretAtEnd = el.selectionStart === el.value.length;
+  if (k === 'phone') {
+    // Someone typing the +63 themselves: leave "+", "+6", "+63", "6", "63" as typed until the number starts.
+    if (/^\+?6?3?$/.test(el.value.replace(/\s/g, '')) && el.value.trim()) { S.draft.phone = ''; S.err = ''; refreshLive(); return; }
+    let d = phoneDigits(el.value);
+    // Backspacing over a space or the "+63 " should still remove a digit.
+    if (deleting && d === (S.draft.phone || '') && caretAtEnd) d = d.slice(0, -1);
+    S.draft.phone = d;
+    const f = phoneDisplay(d);
+    if (el.value !== f && caretAtEnd) el.value = f;
+  } else if (k === 'bd') {
+    let d = bdayDigits(el.value);
+    if (deleting && d === (S.draft.bd || '') && caretAtEnd) d = d.slice(0, -1);
+    S.draft.bd = d;
+    const f = fmtBday(d);
+    if (el.value !== f && caretAtEnd) el.value = f;
+  } else {
+    S.draft[k] = el.value;
+  }
+  S.err = '';
+  refreshLive();
+}
+document.addEventListener('focusout', (ev) => {
+  if (ev.target?.id === 'f-phone') {
+    S.phoneTouched = true;
+    refreshLive();
+  }
+});
 document.addEventListener('input', onField);
 document.addEventListener('change', onField);
 document.addEventListener('submit', async (ev) => {
